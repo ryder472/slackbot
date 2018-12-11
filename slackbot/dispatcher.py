@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-
 from __future__ import absolute_import
+import sys
+import RPi.GPIO as GPIO
 import logging
 import re
 import time
@@ -40,7 +41,13 @@ class MessageDispatcher(object):
 
     def dispatch_msg(self, msg):
         category = msg[0]
-        msg = msg[1]
+        try:
+            msg1 = msg[1]['attachments'][0]
+            msg2 = msg[1]
+            msg1.update(msg2)
+            msg = msg1
+        except(KeyError):
+            msg = msg[1]
         if not self._dispatch_msg_handler(category, msg):
             if category == u'respond_to':
                 if not self._dispatch_msg_handler('default_reply', msg):
@@ -48,29 +55,51 @@ class MessageDispatcher(object):
 
     def _dispatch_msg_handler(self, category, msg):
         responded = False
-        for func, args in self._plugins.get_plugins(category, msg.get('text', None)):
-            if func:
-                responded = True
-                try:
-                    func(Message(self._client, msg), *args)
-                except:
-                    logger.exception(
-                        'failed to handle message %s with plugin "%s"',
-                        msg['text'], func.__name__)
-                    reply = u'[{}] I had a problem handling "{}"\n'.format(
-                        func.__name__, msg['text'])
-                    tb = u'```\n{}\n```'.format(traceback.format_exc())
-                    if self._errors_to:
-                        self._client.rtm_send_message(msg['channel'], reply)
-                        self._client.rtm_send_message(self._errors_to,
-                                                      '{}\n{}'.format(reply,
-                                                                      tb))
-                    else:
-                        self._client.rtm_send_message(msg['channel'],
-                                                      '{}\n{}'.format(reply,
-                                                                      tb))
+        if 'text' in msg:
+            for func, args in self._plugins.get_plugins(category, msg.get('text', None)):
+                if func:
+                    responded = True
+                    try:
+                        func(Message(self._client, msg), *args)
+                    except:
+                        logger.exception(
+                            'failed to handle message %s with plugin "%s"',
+                            msg['text'], func.__name__)
+                        reply = u'[{}] I had a problem handling "{}"\n'.format(
+                            func.__name__, msg['text'])
+                        tb = u'```\n{}\n```'.format(traceback.format_exc())
+                        if self._errors_to:
+                            self._client.rtm_send_message(msg['channel'], reply)
+                            self._client.rtm_send_message(self._errors_to,
+                                                          '{}\n{}'.format(reply,
+                                                                          tb))
+                        else:
+                            self._client.rtm_send_message(msg['channel'],
+                                                          '{}\n{}'.format(reply,
+                                                                          tb))
+        else:
+            for func, args in self._plugins.get_plugins(category, msg.get('pretext', None)):
+                if func:
+                    responded = True
+                    try:
+                        func(Message(self._client, msg), *args)
+                    except:
+                        logger.exception(
+                            'failed to handle message %s with plugin "%s"',
+                            msg['pretext'], func.__name__)
+                        reply = u'[{}] I had a problem handling "{}"\n'.format(
+                            func.__name__, msg['pretext'])
+                        tb = u'```\n{}\n```'.format(traceback.format_exc())
+                        if self._errors_to:
+                            self._client.rtm_send_message(msg['channel'], reply)
+                            self._client.rtm_send_message(self._errors_to,
+                                                          '{}\n{}'.format(reply,
+                                                                          tb))
+                        else:
+                            self._client.rtm_send_message(msg['channel'],
+                                                          '{}\n{}'.format(reply,
+                                                                          tb))
         return responded
-
     def _on_new_message(self, msg):
         # ignore edits
         subtype = msg.get('subtype', '')
@@ -86,7 +115,6 @@ class MessageDispatcher(object):
                 username = msg['username']
             else:
                 return
-
         if username == botname or username == u'slackbot':
             return
 
@@ -108,7 +136,6 @@ class MessageDispatcher(object):
         bot_name = self._get_bot_name()
         bot_id = self._get_bot_id()
         m = self.AT_MESSAGE_MATCHER.match(full_text)
-
         if channel[0] == 'C' or channel[0] == 'G':
             if not m:
                 return
@@ -135,21 +162,25 @@ class MessageDispatcher(object):
         return msg
 
     def loop(self):
-        while True:
-            events = self._client.rtm_read()
-            for event in events:
-                event_type = event.get('type')
-                if event_type == 'message':
-                    self._on_new_message(event)
-                elif event_type in ['channel_created', 'channel_rename',
-                                    'group_joined', 'group_rename',
-                                    'im_created']:
-                    channel = [event['channel']]
-                    self._client.parse_channel_data(channel)
-                elif event_type in ['team_join', 'user_change']:
-                    user = [event['user']]
-                    self._client.parse_user_data(user)
-            time.sleep(1)
+        try:
+            while True:
+                events = self._client.rtm_read()
+                for event in events:
+                    event_type = event.get('type')
+                    if event_type == 'message':
+                        self._on_new_message(event)
+                    elif event_type in ['channel_created', 'channel_rename',
+                                        'group_joined', 'group_rename',
+                                        'im_created']:
+                        channel = [event['channel']]
+                        self._client.parse_channel_data(channel)
+                    elif event_type in ['team_join', 'user_change']:
+                        user = [event['user']]
+                        self._client.parse_user_data(user)
+                time.sleep(1)
+        except KeyboardInterrupt:
+            GPIO.cleanup()
+            sys.exit(0)
 
     def _default_reply(self, msg):
         default_reply = settings.DEFAULT_REPLY
@@ -262,16 +293,6 @@ class Message(object):
         else:
             text = self.gen_reply(text)
             self.send(text)
-
-    @unicode_compact
-    def direct_reply(self, text):
-        """
-            Send a reply via direct message using RTM API
-            
-        """
-        channel_id = self._client.open_dm_channel(self._get_user_id())
-        self._client.rtm_send_message(channel_id, text)
-
 
     @unicode_compact
     def send(self, text, thread_ts=None):
